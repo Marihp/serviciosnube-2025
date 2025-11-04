@@ -1,0 +1,1 @@
+{"filename": "builds/7e8a1971b7942a92c0ab953ac45f0b4ee66d448a5b43d09980ef7a90b76ac74f.zip", "runtime": "python3.12", "artifacts_dir": "builds", "build_plan": [[["zip", "lambdas/images_handler", null]]], "quiet": "true"}

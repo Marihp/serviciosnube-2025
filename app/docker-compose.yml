@@ -1,12 +1,14 @@
+version: "3.9"
+
 services:
   app:
-    image: nexa-app
     build:
-      context: ./
-      target: dev
+      context: .
       dockerfile: Dockerfile
+      target: dev
     env_file:
       - .env
+    command: ["npm","run","dev"]
     volumes:
       - .:/app
       - /app/node_modules

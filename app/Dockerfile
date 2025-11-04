@@ -1,35 +1,53 @@
-FROM node:20-alpine as base
-RUN apk add --no-cache g++ make py3-pip libc6-compat
-WORKDIR /app
-COPY package*.json ./
-EXPOSE 3000
+# syntax=docker/dockerfile:1
 
-FROM base as builder
+# Base común con toolchain para dependencias nativas (p.ej. sharp)
+FROM node:20-alpine AS base
+RUN apk add --no-cache libc6-compat python3 make g++ \
+  && addgroup -g 1001 -S nodejs \
+  && adduser -S nextjs -u 1001
 WORKDIR /app
+
+# 1) Instalar deps (incluye dev para poder compilar y hacer el build)
+FROM base AS deps
+COPY package*.json ./
+RUN npm ci
+
+# 2) Build de la app usando las deps ya instaladas
+FROM base AS builder
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
 
-
-FROM base as production
+# 3) Runtime: solo lo necesario para ejecutar en producción
+FROM node:20-alpine AS runner
+RUN apk add --no-cache libc6-compat
+ENV NODE_ENV=production
 WORKDIR /app
 
-ENV NODE_ENV=production
-RUN npm ci
+# Copiamos node_modules desde deps y podamos dev deps
+COPY --from=deps /app/node_modules ./node_modules
+RUN npm prune --omit=dev
 
-RUN addgroup -g 1001 -S nodejs
-RUN adduser -S nextjs -u 1001
-USER nextjs
-
-
-COPY --from=builder --chown=nextjs:nodejs /app/.next ./.next
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./package.json
+# Copiamos artefactos de build y archivos necesarios
+COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
+COPY --from=builder /app/package*.json ./
+# Si tienes next.config.js u otros, cópialos también:
+COPY --from=builder /app/next.config.js ./next.config.js
 
-CMD npm start
+USER node
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+EXPOSE 3000
 
-FROM base as dev
+# Debe existir "start" en package.json -> next start
+CMD ["npm","run","start"]
+
+
+# 4) (Opcional) Objetivo de desarrollo
+FROM base AS dev
 ENV NODE_ENV=development
-RUN npm install 
+COPY package*.json ./
+RUN npm install
 COPY . .
-CMD npm run dev
+CMD ["npm","run","dev"]

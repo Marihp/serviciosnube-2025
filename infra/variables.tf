@@ -7,6 +7,7 @@ variable "aws_region" {
 variable "aws_profile" {
   type        = string
   description = "AWS named profile"
+  default     = "terraform-prod"
 }
 
 variable "project" {
@@ -71,7 +72,7 @@ variable "db_allowed_cidrs" {
 # -------- ALB/ASG --------
 variable "instance_type" {
   type    = string
-  default = "t3.micro"
+  default = "t3.small"
 }
 
 variable "asg_desired" {
@@ -92,6 +93,7 @@ variable "alb_health_check_path" {
 variable "alert_email" {
   type        = string
   description = "Email para suscripción SNS (alarmas)"
+  default     = "marhernandezpa@unal.edu.co"
 }
 
 # -------- General --------

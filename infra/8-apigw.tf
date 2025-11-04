@@ -1,4 +1,7 @@
-data "aws_region" "current" {}
+############################################
+# API Gateway REST -> Lambda (recursos directos)
+# - Usa var.aws_region (evita atributo deprecado)
+############################################
 
 resource "aws_api_gateway_rest_api" "api" {
   name        = "${var.project}-${var.environment}-api"
@@ -8,7 +11,7 @@ resource "aws_api_gateway_rest_api" "api" {
   endpoint_configuration { types = ["REGIONAL"] }
 }
 
-# ----- /images GET -> images_lambda -----
+# ----- /images GET -> aws_lambda_function.images -----
 resource "aws_api_gateway_resource" "images" {
   rest_api_id = aws_api_gateway_rest_api.api.id
   parent_id   = aws_api_gateway_rest_api.api.root_resource_id
@@ -29,10 +32,11 @@ resource "aws_api_gateway_integration" "images_get" {
   http_method             = aws_api_gateway_method.images_get.http_method
   type                    = "AWS_PROXY"
   integration_http_method = "POST"
-  uri                     = module.images_lambda.lambda_function_invoke_arn
+  uri                     = "arn:aws:apigateway:${var.aws_region}:lambda:path/2015-03-31/functions/${aws_lambda_function.images.arn}/invocations"
+  depends_on              = [aws_lambda_function.images]
 }
 
-# ----- /students POST -> students_lambda -----
+# ----- /students POST -> aws_lambda_function.students -----
 resource "aws_api_gateway_resource" "students" {
   rest_api_id = aws_api_gateway_rest_api.api.id
   parent_id   = aws_api_gateway_rest_api.api.root_resource_id
@@ -53,14 +57,15 @@ resource "aws_api_gateway_integration" "students_post" {
   http_method             = aws_api_gateway_method.students_post.http_method
   type                    = "AWS_PROXY"
   integration_http_method = "POST"
-  uri                     = module.students_lambda.lambda_function_invoke_arn
+  uri                     = "arn:aws:apigateway:${var.aws_region}:lambda:path/2015-03-31/functions/${aws_lambda_function.students.arn}/invocations"
+  depends_on              = [aws_lambda_function.students]
 }
 
 # Permisos para que API GW invoque las lambdas
 resource "aws_lambda_permission" "allow_apigw_images" {
   statement_id  = "AllowAPIGWInvokeImages"
   action        = "lambda:InvokeFunction"
-  function_name = module.images_lambda.lambda_function_name
+  function_name = aws_lambda_function.images.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_api_gateway_rest_api.api.execution_arn}/*/*/images"
 }
@@ -68,7 +73,7 @@ resource "aws_lambda_permission" "allow_apigw_images" {
 resource "aws_lambda_permission" "allow_apigw_students" {
   statement_id  = "AllowAPIGWInvokeStudents"
   action        = "lambda:InvokeFunction"
-  function_name = module.students_lambda.lambda_function_name
+  function_name = aws_lambda_function.students.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_api_gateway_rest_api.api.execution_arn}/*/*/students"
 }
@@ -98,7 +103,6 @@ resource "aws_cloudwatch_log_group" "apigw_logs" {
 resource "aws_api_gateway_deployment" "deployment" {
   rest_api_id = aws_api_gateway_rest_api.api.id
   triggers = {
-    # Forzar nuevo deployment en cambios relevantes
     redeploy = sha1(jsonencode({
       resources = [aws_api_gateway_resource.images.id, aws_api_gateway_resource.students.id]
       methods   = [aws_api_gateway_method.images_get.id, aws_api_gateway_method.students_post.id]
@@ -106,6 +110,10 @@ resource "aws_api_gateway_deployment" "deployment" {
     }))
   }
   lifecycle { create_before_destroy = true }
+  depends_on = [
+    aws_api_gateway_integration.images_get,
+    aws_api_gateway_integration.students_post
+  ]
 }
 
 resource "aws_api_gateway_stage" "prod" {
@@ -124,19 +132,6 @@ resource "aws_api_gateway_stage" "prod" {
       status      = "$context.status",
       protocol    = "$context.protocol"
     })
-  }
-}
-
-# Method settings (recurso separado)
-resource "aws_api_gateway_method_settings" "all" {
-  rest_api_id = aws_api_gateway_rest_api.api.id
-  stage_name  = aws_api_gateway_stage.prod.stage_name
-  method_path = "*/*"
-
-  settings {
-    metrics_enabled    = true
-    logging_level      = "INFO"
-    data_trace_enabled = false
   }
 }
 
@@ -161,5 +156,5 @@ resource "aws_api_gateway_usage_plan_key" "bind" {
 }
 
 output "api_invoke_url" {
-  value = "https://${aws_api_gateway_rest_api.api.id}.execute-api.${data.aws_region.current.name}.amazonaws.com/${aws_api_gateway_stage.prod.stage_name}"
+  value = "https://${aws_api_gateway_rest_api.api.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_api_gateway_stage.prod.stage_name}"
 }

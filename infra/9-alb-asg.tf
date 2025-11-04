@@ -33,7 +33,7 @@ resource "aws_iam_instance_profile" "ec2_profile" {
   role = aws_iam_role.ec2_role.name
 }
 
-# User data: referencia directa a tu script
+
 resource "aws_launch_template" "web" {
   name_prefix   = "${var.project}-${var.environment}-lt-"
   image_id      = data.aws_ami.al2023.id
@@ -42,8 +42,21 @@ resource "aws_launch_template" "web" {
   iam_instance_profile { name = aws_iam_instance_profile.ec2_profile.name }
   vpc_security_group_ids = [aws_security_group.web.id]
 
-  # Tu script vive en infra/script/app.sh
+
   user_data = base64encode(file("${path.module}/script/app.sh"))
+
+
+  block_device_mappings {
+    device_name = "/dev/xvda" # raíz
+    ebs {
+      volume_size           = 40
+      volume_type           = "gp3"
+      delete_on_termination = true
+      iops                  = 3000
+      throughput            = 125
+      encrypted             = true
+    }
+  }
 
   tag_specifications {
     resource_type = "instance"
@@ -60,7 +73,7 @@ resource "aws_lb" "alb" {
 
 resource "aws_lb_target_group" "tg" {
   name     = "${var.project}-${var.environment}-tg"
-  port     = 80
+  port     = 3000
   protocol = "HTTP"
   vpc_id   = module.vpc.vpc_id
   health_check {
@@ -75,7 +88,7 @@ resource "aws_lb_target_group" "tg" {
 
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.alb.arn
-  port              = 80
+  port              = 3000
   protocol          = "HTTP"
   default_action {
     type             = "forward"
@@ -97,6 +110,15 @@ resource "aws_autoscaling_group" "asg" {
 
   target_group_arns = [aws_lb_target_group.tg.arn]
   health_check_type = "EC2"
+
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      min_healthy_percentage = 90
+      instance_warmup        = 60
+    }
+    triggers = ["launch_template"]
+  }
 
   tag {
     key                 = "Name"

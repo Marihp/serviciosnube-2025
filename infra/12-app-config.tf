@@ -1,104 +1,87 @@
-##############################
-# App config (SSM + Secrets) #
-##############################
+############################################
+# Parámetros de app / DB en SSM (vía module.db)
+############################################
 
-data "aws_region" "current" {}
-data "aws_caller_identity" "current" {}
-
-locals {
-  ssm_path     = "/${var.project}/${var.environment}"
-  api_base_url = "https://${aws_api_gateway_rest_api.api.id}.execute-api.${data.aws_region.current.name}.amazonaws.com/${aws_api_gateway_stage.prod.stage_name}"
-}
-
-# Password aleatorio para el usuario de app (no usar master)
-resource "random_password" "db_app" {
-  length  = 20
-  special = true
-}
-
-# Secreto JSON con credenciales y API keys
-resource "aws_secretsmanager_secret" "app" {
-  name = "${var.project}/${var.environment}/app"
-}
-
-resource "aws_secretsmanager_secret_version" "app" {
-  secret_id = aws_secretsmanager_secret.app.id
-  secret_string = jsonencode({
-    DB_USER              = "appuser"
-    DB_PASSWORD          = random_password.db_app.result
-    AWS_S3_LAMBDA_APIKEY = aws_api_gateway_api_key.key.value
-    AWS_DB_LAMBDA_APIKEY = aws_api_gateway_api_key.key.value
-  })
-}
-
-# SSM parameters (valores no sensibles y endpoints)
-resource "aws_ssm_parameter" "company_name" {
-  name  = "${local.ssm_path}/COMPANY_NAME"
-  type  = "String"
-  value = "NexaCloud" # cámbialo si quieres
-}
-
+# Host / endpoint del RDS
 resource "aws_ssm_parameter" "db_host" {
-  name  = "${local.ssm_path}/DB_HOST"
+  name  = "/${var.project}/${var.environment}/db/host"
   type  = "String"
   value = module.db.db_instance_endpoint
 }
 
-resource "aws_ssm_parameter" "db_database" {
-  name  = "${local.ssm_path}/DB_DATABASE"
+# Puerto
+resource "aws_ssm_parameter" "db_port" {
+  name  = "/${var.project}/${var.environment}/db/port"
   type  = "String"
-  value = "nexacloud"
+  value = tostring(module.db.db_instance_port)
 }
 
-resource "aws_ssm_parameter" "s3_lambda_url" {
-  name  = "${local.ssm_path}/AWS_S3_LAMBDA_URL"
+# Nombre de base
+resource "aws_ssm_parameter" "db_name" {
+  name  = "/${var.project}/${var.environment}/db/name"
+  type  = "String"
+  value = var.rds_db_name
+}
+
+# Usuario
+resource "aws_ssm_parameter" "db_user" {
+  name  = "/${var.project}/${var.environment}/db/user"
+  type  = "String"
+  value = var.rds_username
+}
+
+
+############################################
+# SSM params para URLs y API keys de la app
+# - Usa tu API Gateway ya creado (mismo REST API/Stage)
+############################################
+
+# Base URL de API Gateway (mismo cálculo que tu output)
+locals {
+  api_base_url = "https://${aws_api_gateway_rest_api.api.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_api_gateway_stage.prod.stage_name}"
+}
+
+# --- URLs a tus endpoints ---
+# /images (GET) -> Lambda "images"
+resource "aws_ssm_parameter" "lambda_s3_url" {
+  name  = "/${var.project}/${var.environment}/lambda/s3/url"
   type  = "String"
   value = "${local.api_base_url}/images"
 }
 
-resource "aws_ssm_parameter" "db_lambda_url" {
-  name  = "${local.ssm_path}/AWS_DB_LAMBDA_URL"
+# /students (POST) -> Lambda "students"
+resource "aws_ssm_parameter" "lambda_db_url" {
+  name  = "/${var.project}/${var.environment}/lambda/db/url"
   type  = "String"
   value = "${local.api_base_url}/students"
 }
 
+# --- API Keys ---
+# Reutilizamos TU API key existente para ambos (si quieres 2 llaves distintas, te dejo nota abajo)
+resource "aws_ssm_parameter" "lambda_s3_apikey" {
+  name  = "/${var.project}/${var.environment}/lambda/s3/apikey"
+  type  = "SecureString"
+  value = aws_api_gateway_api_key.key.value
+}
+
+resource "aws_ssm_parameter" "lambda_db_apikey" {
+  name  = "/${var.project}/${var.environment}/lambda/db/apikey"
+  type  = "SecureString"
+  value = aws_api_gateway_api_key.key.value
+}
+
+# --- Otros parámetros usados por tu user_data ---
+# Ruta para stress (ajústala si tu app usa otra)
 resource "aws_ssm_parameter" "stress_path" {
-  name  = "${local.ssm_path}/STRESS_PATH"
+  name  = "/${var.project}/${var.environment}/stress/path"
   type  = "String"
-  value = "/usr/bin/stress"
+  value = "/stress"
 }
 
-resource "aws_ssm_parameter" "lb_url" {
-  name  = "${local.ssm_path}/LOAD_BALANCER_URL"
+# URL del ALB (si no quieres depender del recurso, pásalo vía variable)
+resource "aws_ssm_parameter" "alb_url" {
+  name  = "/${var.project}/${var.environment}/alb/url"
   type  = "String"
-  value = "http://${aws_lb.alb.dns_name}"
+  value = "http://servicios-nube-dev-alb-467986149.us-east-1.elb.amazonaws.com"
 }
 
-# --- Permisos para que EC2 lea estos valores ---
-data "aws_iam_policy_document" "ec2_app_read" {
-  statement {
-    sid     = "ReadSSMParameters"
-    effect  = "Allow"
-    actions = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"]
-    resources = [
-      "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project}/${var.environment}/*"
-    ]
-  }
-  statement {
-    sid       = "ReadAppSecret"
-    effect    = "Allow"
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = [aws_secretsmanager_secret.app.arn]
-  }
-}
-
-resource "aws_iam_policy" "ec2_app_read" {
-  name   = "${var.project}-${var.environment}-ec2-app-read"
-  policy = data.aws_iam_policy_document.ec2_app_read.json
-}
-
-# Lo atachamos al rol de EC2 (definido en 9-alb-asg.tf)
-resource "aws_iam_role_policy_attachment" "ec2_app_read_attach" {
-  role       = aws_iam_role.ec2_role.name
-  policy_arn = aws_iam_policy.ec2_app_read.arn
-}
