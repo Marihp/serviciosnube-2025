@@ -143,3 +143,4 @@ vite.config.ts.timestamp-*
 
 # Terraform
 .terraform
+.infra/build/** */
