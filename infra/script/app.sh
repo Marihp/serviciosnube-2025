@@ -102,7 +102,7 @@ get_ssm_first() {
 }
 
 # ======== LEER SSM y normalizar DB_HOST ========
-COMPANY_NAME="$(get_ssm_first "${SSM_PATH}/app/company_name" "${SSM_PATH}/COMPANY_NAME")"
+COMPANY_NAME="Nexa Cloud"
 
 DB_HOST="$(get_ssm_first "${SSM_PATH}/db/host" "${SSM_PATH}/DB_HOST")"
 DB_PORT="$(get_ssm_first "${SSM_PATH}/db/port" "${SSM_PATH}/DB_PORT")"
