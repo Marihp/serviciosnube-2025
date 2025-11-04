@@ -1,8 +1,59 @@
-import os, json, boto3, psycopg2
+import os
+import re
+import json
+import boto3
+import psycopg2
+from psycopg2.extras import execute_values
 
-sec = boto3.client("secretsmanager")
-DB_ARN = os.environ["DB_SECRET_ARN"]  # master secret (RDS managed)
-APP_ARN = os.environ["APP_SECRET_ARN"]  # app user + apikeys
+ssm = boto3.client("ssm")
+SSM_BASE = os.getenv("SSM_BASE", "/servicios-nube/dev")
+
+
+def _get_param(name, decrypt=True):
+    resp = ssm.get_parameter(Name=name, WithDecryption=decrypt)
+    return resp["Parameter"]["Value"]
+
+
+def _normalize_host_and_port(raw_host: str, port_from_ssm: str):
+    """
+    Normaliza valores de host que pueden venir como:
+      - 'endpoint'
+      - 'endpoint:9876'
+      - 'http://endpoint:9876'
+      - 'https://endpoint'
+      - 'endpoint:9876/loquesea'
+    Retorna (host_solo, puerto_int)
+    """
+    h = (raw_host or "").strip()
+    # quita esquema
+    h = re.sub(r"^https?://", "", h, flags=re.IGNORECASE)
+    # corta cualquier path
+    if "/" in h:
+        h = h.split("/", 1)[0]
+    host_only = h
+    # puerto por defecto: el de SSM
+    port = (
+        int(str(port_from_ssm).strip()) if str(port_from_ssm).strip() else 5432
+    )
+    # si viene con :puerto, úsalo
+    if ":" in h:
+        host_only, maybe_port = h.rsplit(":", 1)
+        if maybe_port.isdigit():
+            port = int(maybe_port)
+    return host_only, port
+
+
+DDL = """
+CREATE TABLE IF NOT EXISTS public.estudiante (
+    id serial PRIMARY KEY,
+    nombre varchar(50),
+    apellido varchar(50),
+    fecha_nacimiento date,
+    direccion varchar(100),
+    correo_electronico varchar(100),
+    carrera varchar(50)
+);
+"""
 
 ROWS = [
     (
@@ -175,92 +226,62 @@ ROWS = [
     ),
 ]
 
-DDL = """
-CREATE TABLE IF NOT EXISTS public.estudiante (
-    id serial PRIMARY KEY,
-    nombre varchar(50),
-    apellido varchar(50),
-    fecha_nacimiento date,
-    direccion varchar(100),
-    correo_electronico varchar(100) UNIQUE,
-    carrera varchar(50)
+INSERT_ONE = """
+INSERT INTO public.estudiante
+    (nombre, apellido, fecha_nacimiento, direccion, correo_electronico, carrera)
+SELECT %s, %s, %s, %s, %s, %s
+WHERE NOT EXISTS (
+    SELECT 1 FROM public.estudiante e WHERE e.correo_electronico = %s
 );
 """
 
 
 def handler(event, ctx):
-    # master creds
-    creds = json.loads(sec.get_secret_value(SecretId=DB_ARN)["SecretString"])
-    # app creds
-    app = json.loads(sec.get_secret_value(SecretId=APP_ARN)["SecretString"])
-    app_user = app["DB_USER"]
-    app_pass = app["DB_PASSWORD"]
+    try:
+        raw_host = _get_param(f"{SSM_BASE}/db/host", decrypt=False)
+        port_ssm = _get_param(f"{SSM_BASE}/db/port", decrypt=False)
+        dbname = _get_param(f"{SSM_BASE}/db/name", decrypt=False)
+        user = _get_param(f"{SSM_BASE}/db/user", decrypt=False)  # master user
+        pwd = _get_param(
+            f"{SSM_BASE}/db/master_password", decrypt=True
+        )  # master password
+        host, port = _normalize_host_and_port(raw_host, port_ssm)
 
-    conn = psycopg2.connect(
-        host=creds["host"],
-        port=creds["port"],
-        dbname=creds["dbname"],
-        user=creds["username"],
-        password=creds["password"],
-        connect_timeout=5,
-    )
+        # Log de depuración para CloudWatch
+        print(
+            f"[db_init] SSM_BASE={SSM_BASE} raw_host='{raw_host}' -> host='{host}' port={port} db='{dbname}' user='{user}'"
+        )
+
+        conn = psycopg2.connect(
+            host=host,
+            port=port,
+            dbname=dbname,
+            user=user,
+            password=pwd,
+            connect_timeout=5,
+        )
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": f"ConnParams: {str(e)}"}),
+        }
+
+    inserted = 0
     try:
         with conn, conn.cursor() as cur:
-            # tabla + datos
             cur.execute(DDL)
-            for nombre, apellido, fecha_nac, direccion, correo, carrera in ROWS:
-                cur.execute(
-                    """
-                    INSERT INTO public.estudiante
-                        (nombre, apellido, fecha_nacimiento, direccion, correo_electronico, carrera)
-                    VALUES (%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (correo_electronico) DO NOTHING;
-                """,
-                    (nombre, apellido, fecha_nac, direccion, correo, carrera),
-                )
-
-            # usuario de app y privilegios mínimos
-            cur.execute(
-                "SELECT 1 FROM pg_roles WHERE rolname = %s", (app_user,)
-            )
-            exists = cur.fetchone() is not None
-            if exists:
-                cur.execute(
-                    f"ALTER ROLE {psycopg2.extensions.AsIs(app_user)} WITH LOGIN PASSWORD %s",
-                    (app_pass,),
-                )
-            else:
-                cur.execute(
-                    f"CREATE ROLE {psycopg2.extensions.AsIs(app_user)} WITH LOGIN PASSWORD %s",
-                    (app_pass,),
-                )
-
-            cur.execute(
-                "GRANT CONNECT ON DATABASE %s TO %s",
-                (
-                    psycopg2.extensions.AsIs(creds["dbname"]),
-                    psycopg2.extensions.AsIs(app_user),
-                ),
-            )
-            cur.execute(
-                "GRANT USAGE ON SCHEMA public TO %s",
-                (psycopg2.extensions.AsIs(app_user),),
-            )
-            cur.execute(
-                "GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO %s",
-                (psycopg2.extensions.AsIs(app_user),),
-            )
-            cur.execute(
-                "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO %s",
-                (psycopg2.extensions.AsIs(app_user),),
-            )
-
+            for n, a, f, d, c, k in ROWS:
+                cur.execute(INSERT_ONE, (n, a, f, d, c, k, c))
+                if cur.rowcount == 1:
+                    inserted += 1
             cur.execute("SELECT count(*) FROM public.estudiante;")
             total = cur.fetchone()[0]
 
         return {
             "statusCode": 200,
-            "body": json.dumps({"ok": True, "rows_total": total}),
+            "body": json.dumps(
+                {"ok": True, "inserted_now": inserted, "rows_total": total}
+            ),
         }
     finally:
         conn.close()

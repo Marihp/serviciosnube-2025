@@ -3,10 +3,9 @@
 ############################################
 
 #########################
-# Variables NO conflictivas
+# Variables
 #########################
 
-# Runtime de Lambda (usa 3.12 o 3.13)
 variable "lambda_runtime" {
   type        = string
   default     = "python3.12"
@@ -53,18 +52,7 @@ variable "lambda_exec_role_arn" {
   description = "ARN de un IAM Role existente para Lambda. Si vacío, se crea uno nuevo."
 }
 
-# VPC opcional
-variable "lambda_vpc_subnet_ids" {
-  type    = list(string)
-  default = []
-}
-
-variable "lambda_vpc_security_group_ids" {
-  type    = list(string)
-  default = []
-}
-
-# Variables de entorno por función
+# Variables de entorno por función (extra)
 variable "images_env" {
   type    = map(string)
   default = {}
@@ -84,12 +72,19 @@ variable "lambda_tags_extra" {
   default = {}
 }
 
+# Bucket S3 donde están las imágenes
+variable "images_bucket" {
+  type        = string
+  description = "Bucket S3 donde están las imágenes"
+  default     = "servicios-nube-dev-images"
+}
+
 #########################
-# Locals (usa var.project/var.environment ya definidos en tu repo)
+# Locals
 #########################
 
 locals {
-  # Requiere que en tu repo ya existan var.project y var.environment
+  # Requiere que en tu repo existan var.project / var.environment
   name_prefix = "${var.project}-${var.environment}"
 
   tags = merge({
@@ -130,11 +125,37 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# Acceso VPC opcional
+# Acceso a VPC (ENABLED siempre que usemos vpc_config)
 resource "aws_iam_role_policy_attachment" "lambda_vpc" {
-  count      = (var.lambda_exec_role_arn == "" && length(var.lambda_vpc_subnet_ids) > 0 && length(var.lambda_vpc_security_group_ids) > 0) ? 1 : 0
+  count      = var.lambda_exec_role_arn == "" ? 1 : 0
   role       = aws_iam_role.lambda_exec[0].name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+# Política mínima para que la Lambda de imágenes lea el bucket
+resource "aws_iam_role_policy" "images_s3_access" {
+  count = var.lambda_exec_role_arn == "" ? 1 : 0
+
+  name = "${local.name_prefix}-images-s3"
+  role = aws_iam_role.lambda_exec[0].name
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid      = "ListBucket",
+        Effect   = "Allow",
+        Action   = ["s3:ListBucket"],
+        Resource = "arn:aws:s3:::${var.images_bucket}"
+      },
+      {
+        Sid      = "ReadObjects",
+        Effect   = "Allow",
+        Action   = ["s3:GetObject"],
+        Resource = "arn:aws:s3:::${var.images_bucket}/*"
+      }
+    ]
+  })
 }
 
 # ARN efectivo del role (si no se creó, usa el pasado por variable)
@@ -154,7 +175,7 @@ resource "null_resource" "ensure_build_dir" {
   triggers = { always = timestamp() }
 }
 
-# Instala requirements.txt dentro de cada carpeta (opcional)
+# Instala requirements.txt dentro de cada carpeta (opcional con Docker SAM)
 resource "null_resource" "images_pip" {
   triggers = { use = tostring(var.use_docker_packaging) }
   provisioner "local-exec" {
@@ -227,6 +248,12 @@ resource "aws_cloudwatch_log_group" "dbinit" {
 # Lambdas (handler = app.handler)
 #########################
 
+# Helper para VPC config (usa tus subnets privadas y el SG de lambdas)
+locals {
+  lambda_subnets = module.vpc.private_subnets
+  lambda_sg_ids  = [aws_security_group.lambdas.id]
+}
+
 # Images Handler
 resource "aws_lambda_function" "images" {
   function_name = "${local.name_prefix}-images-handler"
@@ -241,14 +268,24 @@ resource "aws_lambda_function" "images" {
   source_code_hash = data.archive_file.images_zip.output_base64sha256
 
   dynamic "vpc_config" {
-    for_each = length(var.lambda_vpc_subnet_ids) > 0 && length(var.lambda_vpc_security_group_ids) > 0 ? [1] : []
+    for_each = length(local.lambda_subnets) > 0 ? [1] : []
     content {
-      subnet_ids         = var.lambda_vpc_subnet_ids
-      security_group_ids = var.lambda_vpc_security_group_ids
+      subnet_ids         = local.lambda_subnets
+      security_group_ids = local.lambda_sg_ids
     }
   }
 
-  environment { variables = var.images_env }
+  # Publica bucket/prefijo por defecto + permite overrides con var.images_env
+  environment {
+    variables = merge(
+      {
+        S3_BUCKET = var.images_bucket
+        S3_PREFIX = "images" # tus objetos están en s3://bucket/images/ (ajusta si cambiaste)
+      },
+      var.images_env
+    )
+  }
+
   tags       = var.enable_lambda_tags ? local.tags : {}
   depends_on = [aws_cloudwatch_log_group.images]
   publish    = true
@@ -268,14 +305,15 @@ resource "aws_lambda_function" "students" {
   source_code_hash = data.archive_file.students_zip.output_base64sha256
 
   dynamic "vpc_config" {
-    for_each = length(var.lambda_vpc_subnet_ids) > 0 && length(var.lambda_vpc_security_group_ids) > 0 ? [1] : []
+    for_each = length(local.lambda_subnets) > 0 ? [1] : []
     content {
-      subnet_ids         = var.lambda_vpc_subnet_ids
-      security_group_ids = var.lambda_vpc_security_group_ids
+      subnet_ids         = local.lambda_subnets
+      security_group_ids = local.lambda_sg_ids
     }
   }
 
   environment { variables = var.students_env }
+
   tags       = var.enable_lambda_tags ? local.tags : {}
   depends_on = [aws_cloudwatch_log_group.students]
   publish    = true
@@ -295,21 +333,22 @@ resource "aws_lambda_function" "db_init" {
   source_code_hash = data.archive_file.db_init_zip.output_base64sha256
 
   dynamic "vpc_config" {
-    for_each = length(var.lambda_vpc_subnet_ids) > 0 && length(var.lambda_vpc_security_group_ids) > 0 ? [1] : []
+    for_each = length(local.lambda_subnets) > 0 ? [1] : []
     content {
-      subnet_ids         = var.lambda_vpc_subnet_ids
-      security_group_ids = var.lambda_vpc_security_group_ids
+      subnet_ids         = local.lambda_subnets
+      security_group_ids = local.lambda_sg_ids
     }
   }
 
   environment { variables = var.db_init_env }
+
   tags       = var.enable_lambda_tags ? local.tags : {}
   depends_on = [aws_cloudwatch_log_group.dbinit]
   publish    = true
 }
 
 #########################
-# Outputs (opcionales)
+# Outputs
 #########################
 
 output "lambda_arns" {

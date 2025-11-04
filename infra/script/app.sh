@@ -114,7 +114,7 @@ AWS_S3_LAMBDA_URL="$(get_ssm_first "${SSM_PATH}/lambda/s3/url" "${SSM_PATH}/AWS_
 AWS_DB_LAMBDA_URL="$(get_ssm_first "${SSM_PATH}/lambda/db/url" "${SSM_PATH}/AWS_DB_LAMBDA_URL")"
 AWS_S3_LAMBDA_APIKEY="$(get_ssm_first "${SSM_PATH}/lambda/s3/apikey" "${SSM_PATH}/AWS_S3_LAMBDA_APIKEY")"
 AWS_DB_LAMBDA_APIKEY="$(get_ssm_first "${SSM_PATH}/lambda/db/apikey" "${SSM_PATH}/AWS_DB_LAMBDA_APIKEY")"
-STRESS_PATH="$(get_ssm_first "${SSM_PATH}/stress/path" "${SSM_PATH}/STRESS_PATH")"
+STRESS_PATH="/api/performHighServerLoad"
 LOAD_BALANCER_URL="$(get_ssm_first "${SSM_PATH}/alb/url" "${SSM_PATH}/LOAD_BALANCER_URL")"
 
 if [[ "${DB_HOST}" == *:* ]]; then
