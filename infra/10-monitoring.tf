@@ -1,20 +1,10 @@
 
-variable "project" { type = string }
-variable "environment" { type = string }
+
 variable "rds_identifier" { type = string } # p.ej: "servicios-nube-dev"
 variable "alb_arn_suffix" { type = string } # de la consola (ALB > Description > ARN Suffix)
 variable "apigw_id" { type = string }       # API id (rest API)
 variable "apigw_stage" { type = string }    # "prod"
-variable "alert_email" { type = string }    # tu correo
 
-locals {
-  name_prefix = "${var.project}-${var.environment}"
-  tags = {
-    Project     = var.project
-    Environment = var.environment
-    ManagedBy   = "Terraform"
-  }
-}
 
 # SNS para alertas
 resource "aws_sns_topic" "alerts" {
